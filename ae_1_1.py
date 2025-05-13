@@ -90,6 +90,27 @@ def load_mnist():
         print(f"Ошибка загрузки MNIST: {str(e)}")
         return None, None
 
+def load_cifar10():
+    try:
+        (x_train, _), (x_test, _) = tf.keras.datasets.cifar10.load_data()
+        
+        # Нормализация
+        x_train = x_train.astype('float32') / 255.0
+        x_test = x_test.astype('float32') / 255.0
+        
+        # Ресайз до нужного размера
+        x_train = tf.image.resize(x_train, img_shape[:2]).numpy()
+        x_test = tf.image.resize(x_test, img_shape[:2]).numpy()
+        
+        print(f"\nCIFAR-10 - Train shape: {x_train.shape}, Test shape: {x_test.shape}")
+        print(f"Диапазон значений: {x_train.min()} - {x_train.max()}")
+        
+        return x_train, x_test
+        
+    except Exception as e:
+        print(f"Ошибка загрузки CIFAR-10: {str(e)}")
+        return None, None
+    
 # ================== АРХИТЕКТУРА АВТОКОДИРОВЩИКА ==================
 class AE(tf.keras.Model):
     def __init__(self, **kwargs):
@@ -185,13 +206,56 @@ def load_weights():
         print(f"Ошибка загрузки весов: {str(e)}")
         return False
 
+# def load_custom_images(image_dir, target_size=(32, 32)):
+#     image_paths = [os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('jpg', 'png'))]
+#     images = []
+#     for path in image_paths:
+#         img = tf.keras.utils.load_img(path, target_size=target_size)
+#         img = tf.keras.utils.img_to_array(img) / 255.0
+#         images.append(img)
+#     return np.array(images)
+
+# # Использование:
+# custom_images = load_custom_images("path/to/your/images")
+# def test_on_custom_images(model, image_dir):
+#     images = load_custom_images(image_dir)
+#     if len(images) == 0:
+#         print("Нет изображений в директории!")
+#         return
+    
+#     reconstructions = model.predict(images)
+    
+#     # Вычисление метрик
+#     psnr = compute_psnr(images, reconstructions).numpy()
+#     ssim_val = compute_ssim(images, reconstructions)
+#     mse = compute_mse(images, reconstructions).numpy()
+    
+#     print("\nРезультаты на пользовательских изображениях:")
+#     print(f"PSNR: {psnr:.2f} dB | SSIM: {ssim_val:.4f} | MSE: {mse:.6f}")
+    
+#     # Визуализация
+#     plt.figure(figsize=(10, 4))
+#     for i in range(min(3, len(images))):
+#         plt.subplot(2, 3, i+1)
+#         plt.imshow(images[i])
+#         plt.title("Original")
+#         plt.axis('off')
+        
+#         plt.subplot(2, 3, i+4)
+#         plt.imshow(reconstructions[i])
+#         plt.title("Reconstructed")
+#         plt.axis('off')
+#     plt.tight_layout()
+#     plt.show()
+
 # ================== CALLBACK ДЛЯ ВИЗУАЛИЗАЦИИ ==================
 class AECallback(callbacks.Callback):
-    def __init__(self, time_tracker, x_train, vis_interval=5):
+    def __init__(self, time_tracker, x_train, dataset_name, vis_interval=5):
         super().__init__()
         self.time_tracker = time_tracker
         self.vis_interval = vis_interval
         self.fixed_samples = x_train[:5]
+        self.dataset_name = dataset_name  # Добавлено сохранение имени датасета
     
     def on_epoch_end(self, epoch, logs=None):
         current_time = format_time(time.time() - self.time_tracker.start_time)
@@ -202,6 +266,7 @@ class AECallback(callbacks.Callback):
             
             plt.figure(figsize=(12, 3))
             plt.suptitle(
+                f"Автокодировщик | Датасет: {self.dataset_name}\n"
                 f"Epoch {epoch+1}/{epochs} | Time: {current_time} | ETA: {eta}\n"
                 f"Loss: {logs['total_loss']:.4f} | PSNR: {logs['psnr']:.2f} dB | "
                 f"SSIM: {logs['ssim']:.4f} | MSE: {logs['mse']:.6f}", fontsize=10
@@ -251,33 +316,42 @@ if __name__ == "__main__":
     
     # Компиляция модели
     ae.compile(optimizer=Adam(1e-4))
-    
-    # Обучение
-    try:
-        train_ds = tf.data.Dataset.from_tensor_slices(x_train).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    # Список датасетов для обучения
+    datasets = [
+        ("MNIST", load_mnist),
+        ("CIFAR-10", load_cifar10)
+    ]
+    # Обучение на каждом датасете
+    for dataset_name, load_func in datasets:
+        print(f"\n=== Начало обучения на {dataset_name} ===")
         
-        print("\n=== Начало обучения ===")
-        history = ae.fit(
-            train_ds,
-            epochs=epochs,
-            callbacks=[callback],
-            verbose=1
-        )
-        save_weights()
-    
-    except Exception as e:
-        print(f"\nОшибка обучения: {str(e)}")
-    finally:
-        total_time = format_time(time.time() - time_tracker.start_time)
-        print(f"\nОбщее время выполнения: {total_time}")
+        # Загрузка данных
+        x_train, x_test = load_func()
+        if x_train is None:
+            continue
         
-        # Тестирование
-        if x_test is not None:
-            print("\n=== Финальное тестирование ===")
+        # Подготовка callback'ов
+        time_tracker = TimeTracker()
+        callback = AECallback(time_tracker, x_train, dataset_name)
+
+        # Обучение
+        try:
+            train_ds = tf.data.Dataset.from_tensor_slices(x_train).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+            
+            # print("\n=== Начало обучения ===")
+            history = ae.fit(
+                train_ds,
+                epochs=epochs,
+                callbacks=[callback],
+                verbose=1
+            )
+            save_weights()
+        
+        # Тестирование после обучения на датасете
+            print(f"\n=== Тестирование на {dataset_name} ===")
             test_samples = x_test[:100]
             reconstructions = ae.predict(test_samples, verbose=0)
 
-                    # Убедимся, что данные в правильном формате
             if tf.is_tensor(test_samples):
                 test_samples_np = test_samples.numpy()
             else:
@@ -292,12 +366,12 @@ if __name__ == "__main__":
             ssim_val = compute_ssim(test_samples_np, reconstructions_np)
             mse = float(compute_mse(test_samples, reconstructions).numpy())
             
-            print(f"\nРезультаты на тестовых данных:")
+            print(f"\nРезультаты на тестовых данных ({dataset_name}):")
             print(f"PSNR: {psnr:.2f} dB | SSIM: {ssim_val:.4f} | MSE: {mse:.6f}")
             
-            # Визуализация
+            # Визуализация тестовых примеров
             plt.figure(figsize=(10, 4))
-            plt.suptitle("Тестовые примеры", fontsize=12)
+            plt.suptitle(f"Тестовые примеры ({dataset_name})", fontsize=12)
             for i in range(3):
                 plt.subplot(2, 3, i+1)
                 plt.imshow(test_samples[i])
@@ -310,3 +384,51 @@ if __name__ == "__main__":
                 plt.axis('off')
             plt.tight_layout()
             plt.show()
+            
+        except Exception as e:
+            print(f"\nОшибка обучения на {dataset_name}: {str(e)}")
+        
+        finally:
+            total_time = format_time(time.time() - time_tracker.start_time)
+            print(f"\nОбщее время обучения на {dataset_name}: {total_time}")
+
+    # test_on_custom_images(ae, "path/to/your/images")        
+            # # Тестирование
+            # if x_test is not None:
+            #     print("\n=== Финальное тестирование ===")
+            #     test_samples = x_test[:100]
+            #     reconstructions = ae.predict(test_samples, verbose=0)
+
+            #             # Убедимся, что данные в правильном формате
+            #     if tf.is_tensor(test_samples):
+            #         test_samples_np = test_samples.numpy()
+            #     else:
+            #         test_samples_np = test_samples
+                
+            #     if tf.is_tensor(reconstructions):
+            #         reconstructions_np = reconstructions.numpy()
+            #     else:
+            #         reconstructions_np = reconstructions
+                
+            #     psnr = float(compute_psnr(test_samples, reconstructions).numpy())
+            #     ssim_val = compute_ssim(test_samples_np, reconstructions_np)
+            #     mse = float(compute_mse(test_samples, reconstructions).numpy())
+                
+            #     print(f"\nРезультаты на тестовых данных:")
+            #     print(f"PSNR: {psnr:.2f} dB | SSIM: {ssim_val:.4f} | MSE: {mse:.6f}")
+                
+            #     # Визуализация
+            #     plt.figure(figsize=(10, 4))
+            #     plt.suptitle("Тестовые примеры", fontsize=12)
+            #     for i in range(3):
+            #         plt.subplot(2, 3, i+1)
+            #         plt.imshow(test_samples[i])
+            #         plt.title("Original")
+            #         plt.axis('off')
+                    
+            #         plt.subplot(2, 3, i+4)
+            #         plt.imshow(reconstructions[i])
+            #         plt.title("Reconstructed")
+            #         plt.axis('off')
+            #     plt.tight_layout()
+            #     plt.show()
